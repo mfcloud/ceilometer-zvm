@@ -14,49 +14,8 @@
 
 
 from ceilometer.compute.virt import inspector as virt_inspector
-from ceilometer.i18n import _
-from oslo_config import cfg
 from oslo_log import log
-from oslo_utils import timeutils
-from oslo_utils import units
 
-from ceilometer_zvm.compute.virt.zvm import utils as zvmutils
-
-
-zvm_ops = [
-    cfg.StrOpt('zvm_xcat_server',
-               default=None,
-               help='Host name or IP address of xCAT management_node'),
-    cfg.StrOpt('zvm_xcat_username',
-               default=None,
-               help='xCAT username'),
-    cfg.StrOpt('zvm_xcat_password',
-               default=None,
-               secret=True,
-               help='Password of the xCAT user'),
-    cfg.IntOpt('zvm_xcat_connection_timeout',
-               default=600,
-               help="The number of seconds wait for xCAT MN response"),
-    cfg.StrOpt('xcat_zhcp_nodename',
-               default='zhcp',
-               help='xCat zHCP nodename in xCAT '),
-    cfg.StrOpt('zvm_host',
-               default=None,
-               help='z/VM host that managed by xCAT MN.'),
-    cfg.StrOpt('zvm_xcat_master',
-               default='xcat',
-               help='The xCAT MM node name'),
-    cfg.IntOpt('cache_update_interval',
-               default=600,
-               help="Cached data update interval"),
-    cfg.StrOpt('zvm_xcat_ca_file',
-               default=None,
-               help="CA file for https connection to xcat"),
-]
-
-
-CONF = cfg.CONF
-CONF.register_opts(zvm_ops, group='zvm')
 
 LOG = log.getLogger(__name__)
 
@@ -64,129 +23,13 @@ LOG = log.getLogger(__name__)
 class ZVMInspector(virt_inspector.Inspector):
 
     def __init__(self):
-        self.cache = zvmutils.CacheData()
-        self.cache_expiration = timeutils.utcnow_ts()
-
-        self.instances = {}
-        self.zhcp_info = {
-            'nodename': CONF.zvm.xcat_zhcp_nodename,
-            'hostname': zvmutils.get_node_hostname(
-                            CONF.zvm.xcat_zhcp_nodename),
-            'userid': zvmutils.get_userid(CONF.zvm.xcat_zhcp_nodename)
-        }
-
-    def _update_inst_cpu_mem_stat(self, instances):
-        inst_pis = zvmutils.image_performance_query(
-                                self.zhcp_info['nodename'], instances.values())
-
-        for inst_name, userid in instances.items():
-            if userid not in inst_pis.keys():
-                # Not performance data returned for this virtual machine
-                continue
-
-            with zvmutils.expect_invalid_xcat_resp_data():
-                guest_cpus = int(inst_pis[userid]['guest_cpus'])
-                used_cpu_time = inst_pis[userid]['used_cpu_time']
-                used_cpu_time = int(used_cpu_time.partition(' ')[0]) * units.k
-                used_memory = inst_pis[userid]['used_memory']
-                used_memory = int(used_memory.partition(' ')[0]) / units.Ki
-
-            inst_stat = {'nodename': inst_name,
-                         'userid': userid,
-                         'guest_cpus': guest_cpus,
-                         'used_cpu_time': used_cpu_time,
-                         'used_memory': used_memory}
-
-            self.cache.set('cpumem', inst_stat)
-
-    def _update_inst_nic_stat(self, instances):
-        vsw_dict = zvmutils.virutal_network_vswitch_query_iuo_stats(
-                                                    self.zhcp_info['nodename'])
-        with zvmutils.expect_invalid_xcat_resp_data():
-            for vsw in vsw_dict['vswitches']:
-                for nic in vsw['nics']:
-                    for inst_name, userid in instances.items():
-                        if nic['userid'].upper() == userid.upper():
-                            nic_entry = {'vswitch_name': vsw['vswitch_name'],
-                                         'nic_vdev': nic['vdev'],
-                                         'nic_fr_rx': int(nic['nic_fr_rx']),
-                                         'nic_fr_tx': int(nic['nic_fr_tx']),
-                                         'nic_rx': int(nic['nic_rx']),
-                                         'nic_tx': int(nic['nic_tx'])}
-                            inst_stat = self.cache.get('vnics', inst_name)
-                            if inst_stat is None:
-                                inst_stat = {
-                                    'nodename': inst_name,
-                                    'userid': userid,
-                                    'nics': [nic_entry]
-                                }
-                            else:
-                                inst_stat['nics'].append(nic_entry)
-                            self.cache.set('vnics', inst_stat)
-
-    def _update_cache(self, meter, instances={}):
-        if instances == {}:
-            self.cache.clear()
-            self.cache_expiration = (timeutils.utcnow_ts() +
-                                     CONF.zvm.cache_update_interval)
-            instances = self.instances = zvmutils.list_instances(
-                                                                self.zhcp_info)
-        if meter == 'cpumem':
-            self._update_inst_cpu_mem_stat(instances)
-        if meter == 'vnics':
-            self._update_inst_nic_stat(instances)
-
-    def _check_expiration_and_update_cache(self, meter):
-        now = timeutils.utcnow_ts()
-        if now >= self.cache_expiration:
-            self._update_cache(meter)
-
-    def _get_inst_stat(self, meter, instance):
-        inst_name = zvmutils.get_inst_name(instance)
-        # zvm inspector can not get instance info in shutdown stat
-        if zvmutils.get_inst_power_state(instance) == 0x04:
-            msg = _("Can not get vm info in shutdown state "
-                    "for %s") % inst_name
-            raise virt_inspector.InstanceShutOffException(msg)
-
-        self._check_expiration_and_update_cache(meter)
-
-        inst_stat = self.cache.get(meter, inst_name)
-
-        if inst_stat is None:
-            userid = (self.instances.get(inst_name) or
-                        zvmutils.get_userid(inst_name))
-            self._update_cache(meter, {inst_name: userid})
-            inst_stat = self.cache.get(meter, inst_name)
-
-        if inst_stat is None:
-            msg = _("Can not get vm info for %s") % inst_name
-            raise virt_inspector.InstanceNotFoundException(msg)
-        else:
-            return inst_stat
+        pass
 
     def inspect_cpus(self, instance):
-        inst_stat = self._get_inst_stat('cpumem', instance)
-        return virt_inspector.CPUStats(number=inst_stat['guest_cpus'],
-                                       time=inst_stat['used_cpu_time'])
+        pass
 
     def inspect_memory_usage(self, instance, duration=None):
-        inst_stat = self._get_inst_stat('cpumem', instance)
-        return virt_inspector.MemoryUsageStats(usage=inst_stat['used_memory'])
+        pass
 
     def inspect_vnics(self, instance):
-        inst_stat = self._get_inst_stat('vnics', instance)
-        for nic in inst_stat['nics']:
-            nic_id = '_'.join((nic['vswitch_name'], inst_stat['userid'],
-                               nic['nic_vdev']))
-            interface = virt_inspector.Interface(
-                name=nic_id,
-                mac=None,
-                fref=None,
-                parameters=None)
-            stats = virt_inspector.InterfaceStats(
-                rx_bytes=nic['nic_rx'],
-                rx_packets=nic['nic_fr_rx'],
-                tx_bytes=nic['nic_tx'],
-                tx_packets=nic['nic_fr_tx'])
-            yield (interface, stats)
+        pass
