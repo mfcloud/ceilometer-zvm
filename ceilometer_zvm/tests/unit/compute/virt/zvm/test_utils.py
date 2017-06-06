@@ -13,6 +13,7 @@
 #    under the License.
 
 
+import mock
 import unittest
 
 from ceilometer_zvm.compute.virt.zvm import utils as zvmutils
@@ -20,8 +21,13 @@ from ceilometer_zvm.compute.virt.zvm import utils as zvmutils
 
 class TestZVMUtils(unittest.TestCase):
 
-    _inst = {'OS-EXT-SRV-ATTR:instance_name': 'fakeinst',
-             'OS-EXT-STS:power_state': 0x01}
+    def setUp(self):
+        super(TestZVMUtils, self).setUp()
+        self._inst = mock.MagicMock()
+        setattr(self._inst, 'OS-EXT-SRV-ATTR:instance_name',
+                'fakeinst')
+        setattr(self._inst, 'OS-EXT-STS:power_state',
+                0x01)
 
     def test_get_instance_name(self):
         inst = zvmutils.get_inst_name(self._inst)
