@@ -46,6 +46,25 @@ class ZVMInspector(virt_inspector.Inspector):
         used_mem_mb = mem_data['used_mem_kb'] / units.Ki
         return virt_inspector.MemoryUsageStats(usage=used_mem_mb)
 
+    def inspect_vnics(self, instance):
+        nics_data = self._inspect_inst_data(instance, 'vnics')
+        # Construct the final result
+        for nic in nics_data:
+            nic_id = '_'.join((nic['vswitch_name'],
+                               zvmutils.get_inst_name(instance),
+                               nic['nic_vdev']))
+            interface = virt_inspector.Interface(
+                name=nic_id,
+                mac=None,
+                fref=None,
+                parameters=None)
+            stats = virt_inspector.InterfaceStats(
+                rx_bytes=nic['nic_rx'],
+                rx_packets=nic['nic_fr_rx'],
+                tx_bytes=nic['nic_tx'],
+                tx_packets=nic['nic_fr_tx'])
+            yield (interface, stats)
+
     def _inspect_inst_data(self, instance, inspect_type):
         inspect_data = {}
         inst_name = zvmutils.get_inst_name(instance)
@@ -60,8 +79,10 @@ class ZVMInspector(virt_inspector.Inspector):
         try:
             if inspect_type == 'cpu':
                 inspect_data = self._sdkapi.guest_inspect_cpus(inst_name)
-            else:
+            elif inspect_type == 'mem':
                 inspect_data = self._sdkapi.guest_inspect_mem(inst_name)
+            elif inspect_type == 'vnics':
+                inspect_data = self._sdkapi.guest_inspect_vnics(inst_name)
         except sdkexception.ZVMVirtualMachineNotExist:
             raise virt_inspector.InstanceNotFoundException(msg_notexist)
         except Exception:
@@ -83,6 +104,3 @@ class ZVMInspector(virt_inspector.Inspector):
                 raise virt_inspector.InstanceNoDataException(msg_nodata)
         else:
             return inspect_data[index_key]
-
-    def inspect_vnics(self, instance):
-        pass

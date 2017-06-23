@@ -41,6 +41,26 @@ class TestZVMInspector(unittest.TestCase):
                           'max_mem_kb': 3097152,
                           'min_mem_kb': 0,
                           'shared_mem_kb': 5222192}
+        self._vnics_list = [{'vswitch_name': 'vsw1',
+                            'nic_vdev': '0600',
+                            'nic_fr_rx': 99999,
+                            'nic_fr_tx': 99999,
+                            'nic_rx': 9999999,
+                            'nic_tx': 9999999,
+                            'nic_fr_rx_dsc': 0,
+                            'nic_fr_tx_dsc': 0,
+                            'nic_fr_rx_err': 0,
+                            'nic_fr_tx_err': 0},
+                            {'vswitch_name': 'vsw2',
+                            'nic_vdev': '0700',
+                            'nic_fr_rx': 88888,
+                            'nic_fr_tx': 88888,
+                            'nic_rx': 8888888,
+                            'nic_tx': 8888888,
+                            'nic_fr_rx_dsc': 0,
+                            'nic_fr_tx_dsc': 0,
+                            'nic_fr_rx_err': 0,
+                            'nic_fr_tx_err': 0}]
 
     @mock.patch.object(zvminspector.ZVMInspector, "_inspect_inst_data")
     def test_inspect_cpus(self, inspect_inst):
@@ -58,6 +78,19 @@ class TestZVMInspector(unittest.TestCase):
         inspect_inst.assert_called_once_with(self._inst, 'mem')
         self.assertIsInstance(rdata, virt_inspector.MemoryUsageStats)
         self.assertEqual(rdata.usage, 381)
+
+    @mock.patch("ceilometer_zvm.compute.virt.zvm.inspector.ZVMInspector."
+                "_inspect_inst_data")
+    @mock.patch.object(zvmutils, 'get_inst_name')
+    def test_inspect_vnics(self, get_inst_name, inspect_data):
+        get_inst_name.return_value = 'INST1'
+        inspect_data.return_value = self._vnics_list
+        nic, stat = list(self._inspector.inspect_vnics({'inst1': 'INST1'}))[0]
+        if nic.name == 'vsw1_INST1_0600':
+            self.assertEqual(99999, stat.rx_packets)
+        else:
+            self.assertEqual(8888888, stat.rx_bytes)
+        inspect_data.assert_called_once_with({'inst1': 'INST1'}, 'vnics')
 
     @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_mem')
     @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
@@ -90,6 +123,25 @@ class TestZVMInspector(unittest.TestCase):
         sdk_inspect_mem.assert_called_once_with('FAKEINST')
         sdk_inspect_cpu.assert_not_called()
         self.assertDictEqual(rdata, self._mem_dict)
+
+    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_mem')
+    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_vnics')
+    @mock.patch.object(zvmutils, 'get_inst_power_state')
+    @mock.patch.object(zvmutils, 'get_inst_name')
+    def test_private_inspect_inst_type_vnics(self, inst_name, inst_power_state,
+                                             sdk_inspect_vnics,
+                                             sdk_inspect_mem, sdk_inspect_cpu):
+        inst_name.return_value = 'FAKEINST'
+        inst_power_state.return_value = 0x01
+        sdk_inspect_vnics.return_value = {'FAKEINST': self._vnics_list}
+        rdata = self._inspector._inspect_inst_data(self._inst, 'vnics')
+        inst_name.assert_called_once_with(self._inst)
+        inst_power_state.assert_called_once_with(self._inst)
+        sdk_inspect_vnics.assert_called_once_with('FAKEINST')
+        sdk_inspect_cpu.assert_not_called()
+        sdk_inspect_mem.assert_not_called()
+        self.assertListEqual(rdata, self._vnics_list)
 
     @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
