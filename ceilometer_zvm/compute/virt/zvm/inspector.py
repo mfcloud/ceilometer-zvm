@@ -31,7 +31,7 @@ class ZVMInspector(virt_inspector.Inspector):
         self._sdkapi = sdkapi.SDKAPI()
 
     def inspect_cpus(self, instance):
-        cpu_data = self._inspect_cpumem_data(instance, 'cpu')
+        cpu_data = self._inspect_inst_data(instance, 'cpu')
 
         # Construct the final result
         cpu_number = cpu_data['guest_cpus']
@@ -40,13 +40,13 @@ class ZVMInspector(virt_inspector.Inspector):
                                        time=used_cpu_time)
 
     def inspect_memory_usage(self, instance, duration=None):
-        mem_data = self._inspect_cpumem_data(instance, 'mem')
+        mem_data = self._inspect_inst_data(instance, 'mem')
 
         # Construct the final result
         used_mem_mb = mem_data['used_mem_kb'] / units.Ki
         return virt_inspector.MemoryUsageStats(usage=used_mem_mb)
 
-    def _inspect_cpumem_data(self, instance, inspect_type):
+    def _inspect_inst_data(self, instance, inspect_type):
         inspect_data = {}
         inst_name = zvmutils.get_inst_name(instance)
         msg_shutdown = _("Can not get vm info in shutdown state "
