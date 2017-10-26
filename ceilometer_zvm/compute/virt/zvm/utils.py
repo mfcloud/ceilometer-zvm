@@ -14,9 +14,13 @@
 
 
 from ceilometer.compute.virt import inspector
+from ceilometer_zvm.compute.virt.zvm import conf
+from ceilometer_zvm.compute.virt.zvm import exception
 from oslo_log import log as logging
+from sdkclient import client as sdkclient
 
 
+CONF = conf.CONF
 LOG = logging.getLogger(__name__)
 
 
@@ -30,3 +34,21 @@ def get_inst_name(instance):
 
 def get_inst_power_state(instance):
     return getattr(instance, 'OS-EXT-STS:power_state', None)
+
+
+class ZVMSDKRequestHandler(object):
+
+    def __init__(self):
+        self._sdkclient = sdkclient.SDKClient(CONF.zvm_sdkserver_addr)
+
+    def call(self, func_name, *args, **kwargs):
+        results = self._sdkclient.send_request(func_name, *args, **kwargs)
+        if results['overallRC'] == 0:
+            return results['output']
+        else:
+            msg = ("SDK request %(api)s failed with parameters: %(args)s "
+                   "%(kwargs)s . Error messages: %(errmsg)s" %
+                   {'api': func_name, 'args': str(args), 'kwargs': str(kwargs),
+                    'errmsg': results['errmsg']})
+            LOG.debug(msg)
+            raise exception.ZVMSDKRequestFailed(msg=msg, results=results)

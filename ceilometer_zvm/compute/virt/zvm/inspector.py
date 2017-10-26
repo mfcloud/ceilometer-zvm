@@ -13,57 +13,48 @@
 #    under the License.
 
 
+import six
+
 from ceilometer.compute.virt import inspector as virt_inspector
 from ceilometer.i18n import _
+from ceilometer_zvm.compute.virt.zvm import exception
 from ceilometer_zvm.compute.virt.zvm import utils as zvmutils
-from oslo_log import log
 from oslo_utils import units
-from zvmsdk import api as sdkapi
-from zvmsdk import exception as sdkexception
-
-
-LOG = log.getLogger(__name__)
 
 
 class ZVMInspector(virt_inspector.Inspector):
 
     def __init__(self):
-        self._sdkapi = sdkapi.SDKAPI()
-
-    def inspect_cpus(self, instance):
-        cpu_data = self._inspect_inst_data(instance, 'cpu')
-
-        # Construct the final result
-        cpu_number = cpu_data['guest_cpus']
-        used_cpu_time = (cpu_data['used_cpu_time_us'] * units.k)
-        return virt_inspector.CPUStats(number=cpu_number,
-                                       time=used_cpu_time)
-
-    def inspect_memory_usage(self, instance, duration=None):
-        mem_data = self._inspect_inst_data(instance, 'mem')
-
-        # Construct the final result
-        used_mem_mb = mem_data['used_mem_kb'] / units.Ki
-        return virt_inspector.MemoryUsageStats(usage=used_mem_mb)
+        self._sdkreq = zvmutils.ZVMSDKRequestHandler()
 
     def inspect_vnics(self, instance):
         nics_data = self._inspect_inst_data(instance, 'vnics')
         # Construct the final result
         for nic in nics_data:
-            nic_id = '_'.join((nic['vswitch_name'],
-                               zvmutils.get_inst_name(instance),
-                               nic['nic_vdev']))
-            interface = virt_inspector.Interface(
-                name=nic_id,
-                mac=None,
-                fref=None,
-                parameters=None)
-            stats = virt_inspector.InterfaceStats(
-                rx_bytes=nic['nic_rx'],
-                rx_packets=nic['nic_fr_rx'],
-                tx_bytes=nic['nic_tx'],
-                tx_packets=nic['nic_fr_tx'])
-            yield (interface, stats)
+            yield virt_inspector.InterfaceStats(name=nic['nic_vdev'],
+                                                mac=None,
+                                                fref=None,
+                                                parameters=None,
+                                                rx_bytes=nic['nic_rx'],
+                                                rx_packets=nic['nic_fr_rx'],
+                                                rx_errors=None,
+                                                rx_drop=None,
+                                                tx_bytes=nic['nic_tx'],
+                                                tx_packets=nic['nic_fr_tx'],
+                                                tx_errors=None,
+                                                tx_drop=None
+                                                )
+
+    def inspect_instance(self, instance, duration):
+        inst_stats = self._inspect_inst_data(instance, 'stats')
+        cpu_number = inst_stats['guest_cpus']
+        used_cpu_time = (inst_stats['used_cpu_time_us'] * units.k)
+        used_mem_mb = inst_stats['used_mem_kb'] / units.Ki
+        # Construct the final result
+        return virt_inspector.InstanceStats(cpu_number=cpu_number,
+                                            cpu_time=used_cpu_time,
+                                            memory_usage=used_mem_mb
+                                            )
 
     def _inspect_inst_data(self, instance, inspect_type):
         inspect_data = {}
@@ -77,30 +68,39 @@ class ZVMInspector(virt_inspector.Inspector):
         if zvmutils.get_inst_power_state(instance) == 0x04:
             raise virt_inspector.InstanceShutOffException(msg_shutdown)
         try:
-            if inspect_type == 'cpu':
-                inspect_data = self._sdkapi.guest_inspect_cpus(inst_name)
-            elif inspect_type == 'mem':
-                inspect_data = self._sdkapi.guest_inspect_mem(inst_name)
+            if inspect_type == 'stats':
+                inspect_data = self._sdkreq.call('guest_inspect_stats',
+                                                 inst_name)
             elif inspect_type == 'vnics':
-                inspect_data = self._sdkapi.guest_inspect_vnics(inst_name)
-        except sdkexception.ZVMVirtualMachineNotExist:
-            raise virt_inspector.InstanceNotFoundException(msg_notexist)
-        except Exception:
-            raise virt_inspector.InstanceNoDataException(msg_nodata)
+                inspect_data = self._sdkreq.call('guest_inspect_vnics',
+                                                 inst_name)
+        except Exception as err:
+            msg_nodata += (". Error: %s" % six.text_type(err))
+            raise virt_inspector.NoDataException(msg_nodata)
 
         # Check the inst data is in the returned result
         index_key = inst_name.upper()
         if index_key not in inspect_data:
             # Check the reason: shutdown or not exist or other error
+            power_stat = ''
             try:
-                vm_state = self._sdkapi.guest_get_power_state(inst_name)
-            except sdkexception.ZVMVirtualMachineNotExist:
-                raise virt_inspector.InstanceNotFoundException(msg_notexist)
-            except Exception:
-                raise virt_inspector.InstanceNoDataException(msg_nodata)
-            if vm_state == 'off':
+                power_stat = self._sdkreq.call('guest_get_power_state',
+                                               inst_name)
+            except exception.ZVMSDKRequestFailed as err:
+                if err.results['overallRC'] == 404:
+                    # instance not exists
+                    raise virt_inspector.InstanceNotFoundException(msg_notexist
+                                                                   )
+                else:
+                    msg_nodata += (". Error: %s" % six.text_type(err))
+                    raise virt_inspector.NoDataException(msg_nodata)
+            except Exception as err:
+                msg_nodata += (". Error: %s" % six.text_type(err))
+                raise virt_inspector.NoDataException(msg_nodata)
+
+            if power_stat == 'off':
                 raise virt_inspector.InstanceShutOffException(msg_shutdown)
             else:
-                raise virt_inspector.InstanceNoDataException(msg_nodata)
+                raise virt_inspector.NoDataException(msg_nodata)
         else:
             return inspect_data[index_key]

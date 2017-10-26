@@ -17,10 +17,9 @@ import mock
 import unittest
 
 from ceilometer.compute.virt import inspector as virt_inspector
+from ceilometer_zvm.compute.virt.zvm import exception as zvmexception
 from ceilometer_zvm.compute.virt.zvm import inspector as zvminspector
 from ceilometer_zvm.compute.virt.zvm import utils as zvmutils
-from zvmsdk import api as sdkapi
-from zvmsdk import exception as sdkexception
 
 
 class TestZVMInspector(unittest.TestCase):
@@ -29,18 +28,18 @@ class TestZVMInspector(unittest.TestCase):
         unittest.TestCase.setUp(self)
         self._inspector = zvminspector.ZVMInspector()
         self._inst = mock.MagicMock()
-        self._cpu_dict = {
-            'guest_cpus': 1,
-            'used_cpu_time_us': 7185838,
-            'elapsed_cpu_time_us': 35232895,
-            'min_cpu_count': 2,
-            'max_cpu_limit': 10000,
-            'samples_cpu_in_use': 0,
-            'samples_cpu_delay': 0}
-        self._mem_dict = {'used_mem_kb': 390232,
-                          'max_mem_kb': 3097152,
-                          'min_mem_kb': 0,
-                          'shared_mem_kb': 5222192}
+        self._stats_dict = {'guest_cpus': 1,
+                            'used_cpu_time_us': 7185838,
+                            'elapsed_cpu_time_us': 35232895,
+                            'min_cpu_count': 2,
+                            'max_cpu_limit': 10000,
+                            'samples_cpu_in_use': 0,
+                            'samples_cpu_delay': 0,
+                            'used_mem_kb': 390232,
+                            'max_mem_kb': 3097152,
+                            'min_mem_kb': 0,
+                            'shared_mem_kb': 5222192
+                            }
         self._vnics_list = [{'vswitch_name': 'vsw1',
                             'nic_vdev': '0600',
                             'nic_fr_rx': 99999,
@@ -63,21 +62,14 @@ class TestZVMInspector(unittest.TestCase):
                             'nic_fr_tx_err': 0}]
 
     @mock.patch.object(zvminspector.ZVMInspector, "_inspect_inst_data")
-    def test_inspect_cpus(self, inspect_inst):
-        inspect_inst.return_value = self._cpu_dict
-        rdata = self._inspector.inspect_cpus(self._inst)
-        inspect_inst.assert_called_once_with(self._inst, 'cpu')
-        self.assertIsInstance(rdata, virt_inspector.CPUStats)
-        self.assertEqual(rdata.number, 1)
-        self.assertEqual(rdata.time, 7185838000)
-
-    @mock.patch.object(zvminspector.ZVMInspector, "_inspect_inst_data")
-    def test_inspect_memory_usage(self, inspect_inst):
-        inspect_inst.return_value = self._mem_dict
-        rdata = self._inspector.inspect_memory_usage(self._inst)
-        inspect_inst.assert_called_once_with(self._inst, 'mem')
-        self.assertIsInstance(rdata, virt_inspector.MemoryUsageStats)
-        self.assertEqual(rdata.usage, 381)
+    def test_inspect_instance(self, inspect_inst):
+        inspect_inst.return_value = self._stats_dict
+        rdata = self._inspector.inspect_instance(self._inst, 0)
+        inspect_inst.assert_called_once_with(self._inst, 'stats')
+        self.assertIsInstance(rdata, virt_inspector.InstanceStats)
+        self.assertEqual(rdata.cpu_number, 1)
+        self.assertEqual(rdata.cpu_time, 7185838000)
+        self.assertEqual(rdata.memory_usage, 381)
 
     @mock.patch("ceilometer_zvm.compute.virt.zvm.inspector.ZVMInspector."
                 "_inspect_inst_data")
@@ -85,184 +77,132 @@ class TestZVMInspector(unittest.TestCase):
     def test_inspect_vnics(self, get_inst_name, inspect_data):
         get_inst_name.return_value = 'INST1'
         inspect_data.return_value = self._vnics_list
-        nic, stat = list(self._inspector.inspect_vnics({'inst1': 'INST1'}))[0]
-        if nic.name == 'vsw1_INST1_0600':
-            self.assertEqual(99999, stat.rx_packets)
+        interface = list(self._inspector.inspect_vnics({'inst1': 'INST1'}))[0]
+        if interface.name == '0600':
+            self.assertEqual(99999, interface.rx_packets)
         else:
-            self.assertEqual(8888888, stat.rx_bytes)
+            self.assertEqual(8888888, interface.rx_bytes)
         inspect_data.assert_called_once_with({'inst1': 'INST1'}, 'vnics')
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_mem')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
-    def test_private_inspect_inst_type_cpu(self, inst_name, inst_power_state,
-                                             sdk_inspect_cpu, sdk_inspect_mem):
+    def test_private_inspect_inst_type_stats(self, inst_name, inst_power_state,
+                                             sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpu.return_value = {'FAKEINST': self._cpu_dict}
-        rdata = self._inspector._inspect_inst_data(self._inst, 'cpu')
+        sdkclient_call.return_value = {'FAKEINST': self._stats_dict}
+        rdata = self._inspector._inspect_inst_data(self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpu.assert_called_once_with('FAKEINST')
-        sdk_inspect_mem.assert_not_called()
-        self.assertDictEqual(rdata, self._cpu_dict)
+        sdkclient_call.assert_called_once_with('guest_inspect_stats',
+                                               'FAKEINST')
+        self.assertDictEqual(rdata, self._stats_dict)
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_mem')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
-    @mock.patch.object(zvmutils, 'get_inst_power_state')
-    @mock.patch.object(zvmutils, 'get_inst_name')
-    def test_private_inspect_inst_type_mem(self, inst_name, inst_power_state,
-                                             sdk_inspect_cpu, sdk_inspect_mem):
-        inst_name.return_value = 'FAKEINST'
-        inst_power_state.return_value = 0x01
-        sdk_inspect_mem.return_value = {'FAKEINST': self._mem_dict}
-        rdata = self._inspector._inspect_inst_data(self._inst, 'mem')
-        inst_name.assert_called_once_with(self._inst)
-        inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_mem.assert_called_once_with('FAKEINST')
-        sdk_inspect_cpu.assert_not_called()
-        self.assertDictEqual(rdata, self._mem_dict)
-
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_mem')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_vnics')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_type_vnics(self, inst_name, inst_power_state,
-                                             sdk_inspect_vnics,
-                                             sdk_inspect_mem, sdk_inspect_cpu):
+                                             sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_vnics.return_value = {'FAKEINST': self._vnics_list}
+        sdkclient_call.return_value = {'FAKEINST': self._vnics_list}
         rdata = self._inspector._inspect_inst_data(self._inst, 'vnics')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_vnics.assert_called_once_with('FAKEINST')
-        sdk_inspect_cpu.assert_not_called()
-        sdk_inspect_mem.assert_not_called()
+        sdkclient_call.assert_called_once_with('guest_inspect_vnics',
+                                               'FAKEINST')
         self.assertListEqual(rdata, self._vnics_list)
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_power_off(self, inst_name,
                                               inst_power_state,
-                                              sdk_inspect_cpus):
+                                              sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x04
         self.assertRaises(virt_inspector.InstanceShutOffException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_not_called()
+        sdkclient_call.assert_not_called()
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_not_exist(self, inst_name,
                                               inst_power_state,
-                                              sdk_inspect_cpus):
+                                              sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.side_effect = sdkexception.ZVMVirtualMachineNotExist(
-            msg='msg')
+        sdkclient_call.side_effect = [{}, zvmexception.ZVMSDKRequestFailed(
+            msg='SDK Request Failed', results={'overallRC': 404,
+                                               'output': ''})
+                                      ]
         self.assertRaises(virt_inspector.InstanceNotFoundException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_with('FAKEINST')
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_other_exception(self, inst_name,
                                                     inst_power_state,
-                                                    sdk_inspect_cpus):
+                                                    sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.side_effect = sdkexception.SDKBaseException(
-            msg='msg')
-        self.assertRaises(virt_inspector.InstanceNoDataException,
+        sdkclient_call.side_effect = Exception()
+        self.assertRaises(virt_inspector.NoDataException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_with('FAKEINST')
+        sdkclient_call.assert_called_with('guest_inspect_stats', 'FAKEINST')
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_get_power_state')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_null_data_shutdown(self, inst_name,
                                                        inst_power_state,
-                                                       sdk_inspect_cpus,
-                                                       sdk_power_state):
+                                                       sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.return_value = {}
-        sdk_power_state.return_value = 'off'
+        sdkclient_call.side_effect = [{}, 'off']
         self.assertRaises(virt_inspector.InstanceShutOffException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_once_with('FAKEINST')
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_get_power_state')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
-    @mock.patch.object(zvmutils, 'get_inst_power_state')
-    @mock.patch.object(zvmutils, 'get_inst_name')
-    def test_private_inspect_inst_null_data_not_exist(self, inst_name,
-                                  inst_power_state, sdk_inspect_cpus,
-                                  sdk_power_state):
-        inst_name.return_value = 'FAKEINST'
-        inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.return_value = {}
-        sdk_power_state.side_effect = sdkexception.ZVMVirtualMachineNotExist(
-            msg='msg')
-        self.assertRaises(virt_inspector.InstanceNotFoundException,
-                          self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
-        inst_name.assert_called_once_with(self._inst)
-        inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_once_with('FAKEINST')
-
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_get_power_state')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_null_data_active(self, inst_name,
                                                      inst_power_state,
-                                                     sdk_inspect_cpus,
-                                                     sdk_power_state):
+                                                     sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.return_value = {}
-        sdk_power_state.return_value = 'on'
-        self.assertRaises(virt_inspector.InstanceNoDataException,
+        sdkclient_call.side_effect = [{}, 'on']
+        self.assertRaises(virt_inspector.NoDataException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_once_with('FAKEINST')
 
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_get_power_state')
-    @mock.patch.object(sdkapi.SDKAPI, 'guest_inspect_cpus')
+    @mock.patch.object(zvmutils.ZVMSDKRequestHandler, 'call')
     @mock.patch.object(zvmutils, 'get_inst_power_state')
     @mock.patch.object(zvmutils, 'get_inst_name')
     def test_private_inspect_inst_null_data_unknown_exception(self,
-            inst_name, inst_power_state, sdk_inspect_cpus, sdk_power_state):
+            inst_name, inst_power_state, sdkclient_call):
         inst_name.return_value = 'FAKEINST'
         inst_power_state.return_value = 0x01
-        sdk_inspect_cpus.return_value = {}
-        sdk_power_state.side_effect = sdkexception.SDKBaseException(
-            msg='msg')
-        self.assertRaises(virt_inspector.InstanceNoDataException,
+        sdkclient_call.side_effect = [{}, Exception()]
+        self.assertRaises(virt_inspector.NoDataException,
                           self._inspector._inspect_inst_data,
-                          self._inst, 'cpu')
+                          self._inst, 'stats')
         inst_name.assert_called_once_with(self._inst)
         inst_power_state.assert_called_once_with(self._inst)
-        sdk_inspect_cpus.assert_called_once_with('FAKEINST')
